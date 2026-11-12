@@ -1,22 +1,30 @@
-# VMware / ESXi to Proxmox Migration Playbook
+# VMware / ESXi to Proxmox Migration Notes
 
-**Language versions:** [Cesky](README_CZ.md) | [Deutsch](README_DE.md)
+**Language versions:** [Česky](README_CZ.md) | [Deutsch](README_DE.md)
 
-**Scope:** Validated migration workflow for Linux (Ubuntu Server 24.04) and Windows Server 2022 virtual machines from VMware format to Proxmox KVM/Ceph storage.
+**Scope:** migration workflow for Linux (Ubuntu Server 24.04) and Windows Server 2022 virtual machines from VMware to Proxmox KVM with Ceph storage. Tested on lab VMs.
 **Author:** Radim Kulaviak (isol.cz)
 
-## Key Technical Steps & Requirements
+## 1. Disk controller (critical for Windows)
+- Windows boots only with a driver for the disk controller it sees. A mismatch gives `BSOD 0x7B (INACCESSIBLE_BOOT_DEVICE)`.
+- Either keep the same controller type as on VMware (SATA/SCSI) for the first boot, or install the VirtIO drivers **before** the migration and then switch to VirtIO.
 
-### 1. Disk Controller Mapping (Critical for Windows)
-- The target VM in Proxmox **must use the exact same disk controller type** (SATA, SCSI/LSI Logic, or VirtIO) as the source VM on VMware.
-- Mismatching controllers immediately trigger a `BSOD 0x7B (INACCESSIBLE_BOOT_DEVICE)` on Windows boot.
+## 2. Importing the disk
+- Convert and import a VMDK with `qm disk import` (alias `qm importdisk`). It converts to the target storage format.
+- Proxmox VE 8.2 and later also has a built-in import wizard for ESXi.
 
-### 2. Storage Format Handling
-- Proxmox `LVM-thin` and `Ceph RBD` do not accept raw `.vmdk` files directly.
-- **Workflow:** Import VMDK into a temporary directory storage (`local` / dir) where Proxmox converts it to `raw` or `qcow2`, or perform direct disk import using `qm importdisk`.
+```bash
+# example, adjust VM ID, path and storage name
+qm create 120 --name migrated-vm --memory 4096 --cores 2 \
+  --net0 virtio,bridge=vmbr0 --scsihw virtio-scsi-single
+qm disk import 120 /var/lib/vz/import/vm.vmdk ceph-pool
+qm set 120 --scsi0 ceph-pool:vm-120-disk-0 --boot order=scsi0
+```
 
-### 3. Data Integrity & Verification Checklist
-Before and after migration, verify the environment using strict cryptographic hashes:
-- Record original hostname and network configuration.
-- Generate MD5/SHA256 checksums of test files (`md5sum /root/testdata/*.txt`).
-- Confirm web services respond with identical HTTP status and content (`curl localhost`, Apache check).
+## 3. Verification checklist
+- Record hostname, IP configuration and installed services before the migration.
+- Create SHA-256 checksums of test files before and after: `sha256sum /root/testdata/*`.
+- Check that web services answer with the same HTTP status and content (`curl -I localhost`).
+- Add the VM to the HA manager if it should restart automatically.
+
+*Scope: lab-tested notes, not a description of client projects.*
