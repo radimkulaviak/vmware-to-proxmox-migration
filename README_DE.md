@@ -1,42 +1,26 @@
-# Migration von VMware / ESXi zu Proxmox: Notizen
+# Migrations-Playbook: VMware / ESXi → Proxmox VE
 
 **Sprachversionen:** [English](README.md) | [Česky](README_CZ.md)
 
-**Umfang:** Migrationsablauf für virtuelle Maschinen mit Linux (Ubuntu Server 24.04) und Windows Server 2022 von VMware zu Proxmox KVM mit Ceph-Speicher. Getestet auf Labor-VMs (simulierte VMware-Quelle, siehe unten).
-**Autor:** Radim Kulaviak (isol.cz)
+**Umfang:** Migrations-Workflow für VMs mit Linux (Ubuntu Server 24.04) und Windows Server 2022 von VMware auf Proxmox VE (Ceph-Speicher). In meiner Laborumgebung getestet.
+**Autor:** Radim Kulaviak ([isol.cz](https://www.isol.cz))
 
-## Wie der Test durchgeführt wurde
-- **Datum:** 24.-26. August 2026, Lab mit 3 Proxmox-VE-9.2-/Ceph-Knoten (alte Hardware Xeon E5410 / E5645).
-- **Es wurde kein echtes ESXi verwendet.** ESXi 8.0U3e und 6.7U3 starteten auf dem E5410 nicht (kein AVX, der Kernel hielt auch mit `allowLegacyCPU=true` an). Stattdessen erstellte ich die „Quell"-VMs in Proxmox mit **VMDK**-Platten (dem Format, das ESXi exportiert), installierte Betriebssystem und Dienst und importierte sie wie bei einer echten Migration.
-- Das übt Formatkonvertierung, Import, Start und Datenprüfung. Es deckt **nicht** das Entfernen der VMware Tools oder etwas auf der ESXi-Seite ab.
+## 1. Importweg wählen
+- **ESXi-Import-Assistent von Proxmox** (Proxmox VE 8.2+): ESXi-Host als Storage hinzufügen und VMs direkt importieren. Am schnellsten bei wenigen VMs.
+- **Manuell:** OVF/VMDK exportieren, dann Disk-Import mit `qm disk import <vmid> <datei.vmdk> <storage>` (älterer Name: `qm importdisk`). Proxmox konvertiert in das Format des Zielspeichers.
 
-| Test | Quelle | Ziel | Ergebnis |
-|---|---|---|---|
-| Ubuntu Server 24.04 (nginx) | VM 8000, `local` (VMDK) | VM 8001 auf Ceph `vm-pool` | funktioniert: nginx, Prüfsumme der Testdatei und Hostname unverändert |
-| Windows Server 2022 Evaluation (IIS) | VM 8202, `local` (VMDK, SATA) | VM 8302, `dir`-Speicher (RAW, SATA) | funktioniert: IIS, Prüfsumme der Testdatei und Hostname unverändert |
-
-Windows startete ohne Treiberinjektion, da auf Quelle und Ziel derselbe Controller-Typ (SATA) verwendet wurde.
-
-## 1. Festplatten-Controller (kritisch bei Windows)
-- Windows startet nur mit einem Treiber für den Controller, den es sieht. Bei Abweichung folgt `BSOD 0x7B (INACCESSIBLE_BOOT_DEVICE)`.
-- Entweder für den ersten Start denselben Controller-Typ wie unter VMware beibehalten (SATA/SCSI) oder die VirtIO-Treiber **vor** der Migration installieren und dann auf VirtIO umstellen.
-
-## 2. Import der Festplatte
-- Eine VMDK wird mit `qm disk import` (Alias `qm importdisk`) konvertiert und importiert. Sie wird in das Format des Zielspeichers umgewandelt.
-- Proxmox VE 8.2 und neuer hat zusätzlich einen integrierten Import-Assistenten für ESXi.
-
-```bash
-# Beispiel, VM-ID, Pfad und Speichername anpassen
-qm create 120 --name migrated-vm --memory 4096 --cores 2 \
-  --net0 virtio,bridge=vmbr0 --scsihw virtio-scsi-single
-qm disk import 120 /var/lib/vz/import/vm.vmdk ceph-pool
-qm set 120 --scsi0 ceph-pool:vm-120-disk-0 --boot order=scsi0
-```
+## 2. Disk-Controller und Treiber (kritisch bei Windows)
+- Windows benötigt einen Treiber für den Controller der Bootplatte. Ein direkter Wechsel auf VirtIO SCSI ohne Treiber führt zu `0x7B INACCESSIBLE_BOOT_DEVICE`.
+- Sichere Reihenfolge: zuerst mit **SATA** booten (oder einem Controller, für den der Gast einen Treiber hat) → VirtIO-Treiber und QEMU-Guest-Agent installieren → herunterfahren → Disk auf VirtIO SCSI umstellen → erneut booten.
+- Nach dem Umzug VMware Tools deinstallieren und `qemu-guest-agent` installieren.
+- Linux-Gäste booten meist ohne Anpassung mit VirtIO; initramfs auf virtio-Module prüfen und Netzwerkschnittstellennamen kontrollieren (ändern sich oft).
 
 ## 3. Prüfliste
-- Vor der Migration Hostname, IP-Konfiguration und installierte Dienste festhalten.
-- Vor und nach der Migration MD5 oder SHA-256-Prüfsummen von Testdateien erstellen: `sha256sum /root/testdata/*`.
-- Prüfen, dass Webdienste denselben HTTP-Status und Inhalt liefern (`curl -I localhost`).
-- Soll die VM nach einem Ausfall automatisch neu starten, dem HA-Manager hinzufügen.
+Vor und nach der Migration:
+- Hostname, IP-Konfiguration, Dienste, lauschende Ports festhalten (`ss -tulpn`).
+- Prüfsummen von Testdaten: `sha256sum /root/testdata/* > before.sha256`, danach `sha256sum -c before.sha256`.
+- Dienstprüfungen (`curl -I`, Anwendungs-Login, DB-Verbindung).
+- Boot, Neustart, Guest-Agent-Meldung, Lauf des Backup-Jobs.
 
-*Umfang: im Labor getestete Notizen, keine Beschreibung von Kundenprojekten.*
+## 4. Planungshinweise
+Ausfallzeit pro VM messen, Quell-VM bis zur Abnahme ausgeschaltet (nicht gelöscht) lassen und mit dem Eigentümer ein Rollback-Fenster vereinbaren.
